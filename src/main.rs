@@ -105,7 +105,7 @@ fn main() {
     // let dt = eval(&mut [].into_iter().collect(), &expr).unwrap();
     // println!("{}", dt);
 
-    let tokens = tokenize("let x = 3 * 3 in let y = 4 * x in x + y evalto 45").unwrap();
+    let tokens = tokenize("let x = 3 * 3 in let y = 4 * x in x + y").unwrap();
     let expr = parse_expr(&tokens).unwrap();
 
     let dt = eval(&Environment::Empty, &expr).unwrap();
@@ -122,6 +122,57 @@ fn main() {
     println!("{}", dt);
 
     let tokens = tokenize("let x = let y = 3 - 2 in y * y in let y = 4 in x + y").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize("fun x -> x + 1").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize("let y = 2 in fun x -> x + y").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize("let sq = fun x -> x * x in sq 3 + sq 4").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize("let sm = fun f -> f 3 + f 4 in sm (fun x -> x * x)").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize("let max = fun x -> fun y -> if x < y then y else x in max 3 5").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize("let a = 3 in let f = fun y -> y * a in let a = 5 in f 4").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens =
+        tokenize("let twice = fun f -> fun x -> f (f x) in twice (fun x -> x * x) 2").unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens =
+        tokenize("let twice = fun f -> fun x -> f (f x) in twice twice (fun x -> x * x) 2")
+            .unwrap();
     let expr = parse_expr(&tokens).unwrap();
 
     let dt = eval(&[].into_iter().collect(), &expr).unwrap();

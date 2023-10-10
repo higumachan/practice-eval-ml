@@ -8,6 +8,7 @@ use std::ops::Sub;
 pub enum Value {
     Int(i32),
     Bool(bool),
+    Fun(Box<Environment>, Ident, Box<Expr>),
     Error,
 }
 
@@ -16,6 +17,9 @@ impl Display for Value {
         match self {
             Value::Int(i) => write!(f, "{}", i),
             Value::Bool(b) => write!(f, "{}", b),
+            Value::Fun(environ, ident, expr) => {
+                write!(f, "({}) [fun {} -> {}]", environ, ident, expr)
+            }
             Value::Error => write!(f, "error"),
         }
     }
@@ -32,6 +36,15 @@ impl Value {
     pub fn bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    pub fn fun(&self) -> Option<(Box<Environment>, Ident, Box<Expr>)> {
+        match self {
+            Value::Fun(environ, ident, expr) => {
+                Some((environ.clone(), ident.clone(), expr.clone()))
+            }
             _ => None,
         }
     }
@@ -110,6 +123,8 @@ pub enum Expr {
     Operand2(Box<Expr>, Operator2, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(Ident, Box<Expr>, Box<Expr>),
+    Fun(Ident, Box<Expr>),
+    Apply(Box<Expr>, Box<Expr>),
 }
 
 impl Display for Expr {
@@ -121,6 +136,8 @@ impl Display for Expr {
             Expr::Operand2(e1, op, e2) => write!(f, "({} {} {})", e1, op, e2),
             Expr::If(e1, e2, e3) => write!(f, "(if {} then {} else {})", e1, e2, e3),
             Expr::Let(s, e1, e2) => write!(f, "(let {} = {} in {})", s, e1, e2),
+            Expr::Fun(s, e) => write!(f, "(fun {} -> {})", s, e),
+            Expr::Apply(e1, e2) => write!(f, "({} {})", e1, e2),
         }
     }
 }
@@ -138,6 +155,8 @@ pub enum Rule {
     EIfT,
     EIfF,
     ELet,
+    EFun,
+    EApp,
     BPlus,
     BMinus,
     BTimes,
@@ -176,6 +195,8 @@ impl Display for Rule {
             Rule::ETimes => write!(f, "E-Times"),
             Rule::BTimes => write!(f, "B-Times"),
             Rule::ELet => write!(f, "E-Let"),
+            Rule::EFun => write!(f, "E-Fun"),
+            Rule::EApp => write!(f, "E-App"),
             Rule::EIfT => write!(f, "E-IfT"),
             Rule::EIfF => write!(f, "E-IfF"),
             Rule::ELt => write!(f, "E-Lt"),
@@ -458,6 +479,29 @@ pub fn eval(environment: &Environment, expr: &Expr) -> ApplyResult {
                 environment.clone(),
             )))
         }
+        Expr::Fun(ident, e) => Ok(DerivationNode::Expr(ExprNode::new(
+            expr.clone(),
+            Value::Fun(Box::new(environment.clone()), ident.clone(), e.clone()),
+            Rule::EFun,
+            vec![],
+            environment.clone(),
+        ))),
+        Expr::Apply(func, arg) => {
+            let e1 = eval(environment, func)?;
+            let e2 = eval(environment, arg)?;
+            let (closed_env, ident, func_body) = e1.eval_to().unwrap().fun().unwrap();
+            let e3 = eval(
+                &Environment::Extend(ident.clone(), e2.eval_to().unwrap().clone(), closed_env),
+                &func_body,
+            )?;
+            Ok(DerivationNode::Expr(ExprNode::new(
+                expr.clone(),
+                e3.eval_to().unwrap().clone(),
+                Rule::EApp,
+                vec![Box::new(e1), Box::new(e2), Box::new(e3)],
+                environment.clone(),
+            )))
+        }
         _ => Err(ApplyError::RuleNotDefined),
     }
 }
@@ -530,6 +574,8 @@ pub enum Token {
     Else,
     Let,
     In,
+    Fun,
+    Arrow,
     Int(i32),
     Bool(bool),
     Ident(String),
@@ -551,7 +597,12 @@ pub fn tokenize(input: &str) -> anyhow::Result<Vec<Token>> {
                     num.push(chars.next().unwrap());
                 }
                 if num.is_empty() {
-                    tokens.push(Token::Minus)
+                    if let Some('>') = chars.peek() {
+                        chars.next();
+                        tokens.push(Token::Arrow);
+                    } else {
+                        tokens.push(Token::Minus)
+                    }
                 } else {
                     tokens.push(Token::Int(-num.parse::<i32>()?));
                 }
@@ -577,6 +628,7 @@ pub fn tokenize(input: &str) -> anyhow::Result<Vec<Token>> {
                     "in" => tokens.push(Token::In),
                     "true" => tokens.push(Token::Bool(true)),
                     "false" => tokens.push(Token::Bool(false)),
+                    "fun" => tokens.push(Token::Fun),
                     _ => tokens.push(Token::Ident(s)),
                 }
             }
@@ -602,7 +654,10 @@ pub enum ParseVecResult<'a> {
 impl<'a, T> ParseResult<'a, T> {
     pub fn unwrap(self) -> T {
         match self {
-            ParseResult::Ok(expr, _) => expr,
+            ParseResult::Ok(expr, remain) => {
+                assert!(remain.is_empty(), "Remain is not empty: {:?}", remain);
+                expr
+            }
             ParseResult::Err(tokens) => panic!("Parse error: {:?}", tokens),
         }
     }
@@ -641,6 +696,7 @@ pub fn parse_expr(tokens: &[Token]) -> ParseResult<Expr> {
         Box::new(parse_less_than),
         Box::new(parse_if),
         Box::new(parse_let_in),
+        Box::new(parse_fn_expr),
     ])(tokens)
 }
 
@@ -653,21 +709,49 @@ pub fn parse_unary_expr(tokens: &[Token]) -> ParseResult<Expr> {
     ])(tokens)
 }
 
-pub fn parse_times(tokens: &[Token]) -> ParseResult<Expr> {
+pub fn parse_fn_expr(tokens: &[Token]) -> ParseResult<Expr> {
+    map(
+        sequence(vec![
+            Seq::Skip(tag(Token::Fun)),
+            Seq::Ident(Box::new(parse_ident)),
+            Seq::Skip(tag(Token::Arrow)),
+            Seq::Expr(Box::new(parse_expr)),
+        ]),
+        |exps| Expr::Fun(exps[0].ident().clone(), Box::new(exps[1].expr().clone())),
+    )(tokens)
+}
+
+pub fn parse_apply(tokens: &[Token]) -> ParseResult<Expr> {
     map(
         sequence(vec![
             Seq::Expr(Box::new(parse_unary_expr)),
-            Seq::VecExpr(many0(map(
+            Seq::VecExpr(many0(Box::new(parse_unary_expr))),
+        ]),
+        |exprs| {
+            let mut expr = exprs[0].expr().clone();
+            for arg in exprs[1].exprs() {
+                expr = Expr::Apply(Box::new(expr), Box::new(arg.clone()));
+            }
+            expr
+        },
+    )(tokens)
+}
+
+pub fn parse_times(tokens: &[Token]) -> ParseResult<Expr> {
+    map(
+        sequence(vec![
+            Seq::Expr(Box::new(parse_apply)),
+            Seq::VecOpExpr(many0(map(
                 sequence(vec![
                     Seq::Op(one_of(vec![tag_op(Operator2::Mul)])),
-                    Seq::Expr(Box::new(parse_unary_expr)),
+                    Seq::Expr(Box::new(parse_apply)),
                 ]),
                 |parsed| (parsed[0].op().clone(), parsed[1].expr().clone()),
             ))),
         ]),
         |exprs| {
             let mut expr = exprs[0].expr().clone();
-            for (op, expr2) in exprs[1].exprs() {
+            for (op, expr2) in exprs[1].op_exprs() {
                 expr = Expr::Operand2(Box::new(expr), *op, Box::new(expr2.clone()));
             }
             expr
@@ -716,7 +800,7 @@ pub fn parse_add_sub(tokens: &[Token]) -> ParseResult<Expr> {
     map(
         sequence(vec![
             Seq::Expr(Box::new(parse_times)),
-            Seq::VecExpr(many0(map(
+            Seq::VecOpExpr(many0(map(
                 sequence(vec![
                     Seq::Op(one_of(vec![tag_op(Operator2::Add), tag_op(Operator2::Sub)])),
                     Seq::Expr(Box::new(parse_times)),
@@ -726,7 +810,7 @@ pub fn parse_add_sub(tokens: &[Token]) -> ParseResult<Expr> {
         ]),
         |exprs| {
             let mut expr = exprs[0].expr().clone();
-            for (op, expr2) in exprs[1].exprs() {
+            for (op, expr2) in exprs[1].op_exprs() {
                 expr = Expr::Operand2(Box::new(expr), *op, Box::new(expr2.clone()));
             }
             expr
@@ -764,7 +848,9 @@ pub enum Seq<'a> {
     Skip(ParserFunc<'a, ()>),
     Expr(ParserFunc<'a, Expr>),
     Ident(ParserFunc<'a, Ident>),
-    VecExpr(ParserFunc<'a, Vec<(Operator2, Expr)>>),
+    VecOpExpr(ParserFunc<'a, Vec<(Operator2, Expr)>>),
+    VecExpr(ParserFunc<'a, Vec<Expr>>),
+    OptionExpr(ParserFunc<'a, Option<Expr>>),
     Op(ParserFunc<'a, Operator2>),
 }
 
@@ -772,8 +858,10 @@ pub enum Seq<'a> {
 pub enum SeqValue {
     Expr(Expr),
     Op(Operator2),
-    VecExpr(Vec<(Operator2, Expr)>),
+    VecOpExpr(Vec<(Operator2, Expr)>),
+    VecExpr(Vec<Expr>),
     Ident(Ident),
+    OptionExpr(Option<Expr>),
 }
 
 impl SeqValue {
@@ -784,7 +872,14 @@ impl SeqValue {
         }
     }
 
-    pub fn exprs(&self) -> &Vec<(Operator2, Expr)> {
+    pub fn op_exprs(&self) -> &Vec<(Operator2, Expr)> {
+        match self {
+            SeqValue::VecOpExpr(exprs) => exprs,
+            _ => panic!("Not an expr"),
+        }
+    }
+
+    pub fn exprs(&self) -> &Vec<Expr> {
         match self {
             SeqValue::VecExpr(exprs) => exprs,
             _ => panic!("Not an expr"),
@@ -804,12 +899,26 @@ impl SeqValue {
             _ => panic!("Not an ident"),
         }
     }
+
+    pub fn option_expr(&self) -> &Option<Expr> {
+        match self {
+            SeqValue::OptionExpr(expr) => expr,
+            _ => panic!("Not an option expr"),
+        }
+    }
 }
 
 pub fn map<'a, I: 'a, O: 'a>(parser: ParserFunc<'a, I>, f: fn(I) -> O) -> ParserFunc<'a, O> {
     Box::new(move |tokens| match parser(tokens) {
         ParseResult::Ok(expr, rest) => ParseResult::Ok(f(expr), rest),
         ParseResult::Err(rest) => ParseResult::Err(rest),
+    })
+}
+
+pub fn opt<'a>(parser: ParserFunc<'a, Expr>) -> ParserFunc<'a, Option<Expr>> {
+    Box::new(move |tokens| match parser(tokens) {
+        ParseResult::Ok(expr, rest) => ParseResult::Ok(Some(expr), rest),
+        ParseResult::Err(_) => ParseResult::Ok(None, tokens),
     })
 }
 
@@ -839,10 +948,10 @@ pub fn sequence<'a>(parsers: Vec<Seq<'a>>) -> ParserFunc<Vec<SeqValue>> {
                     }
                     _ => return ParseResult::Err(tokens),
                 },
-                Seq::VecExpr(parser) => match parser(rest) {
+                Seq::VecOpExpr(parser) => match parser(rest) {
                     ParseResult::Ok(exprs, rest2) => {
                         rest = rest2;
-                        results.push(SeqValue::VecExpr(exprs));
+                        results.push(SeqValue::VecOpExpr(exprs));
                     }
                     _ => return ParseResult::Err(tokens),
                 },
@@ -850,6 +959,20 @@ pub fn sequence<'a>(parsers: Vec<Seq<'a>>) -> ParserFunc<Vec<SeqValue>> {
                     ParseResult::Ok(ident, rest2) => {
                         rest = rest2;
                         results.push(SeqValue::Ident(ident));
+                    }
+                    _ => return ParseResult::Err(tokens),
+                },
+                Seq::OptionExpr(parser) => match parser(rest) {
+                    ParseResult::Ok(expr, rest2) => {
+                        rest = rest2;
+                        results.push(SeqValue::OptionExpr(expr));
+                    }
+                    _ => return ParseResult::Err(tokens),
+                },
+                Seq::VecExpr(parser) => match parser(rest) {
+                    ParseResult::Ok(exprs, rest2) => {
+                        rest = rest2;
+                        results.push(SeqValue::VecExpr(exprs));
                     }
                     _ => return ParseResult::Err(tokens),
                 },
@@ -930,35 +1053,35 @@ pub fn parse_let_in(token: &[Token]) -> ParseResult<Expr> {
     }
 }
 
-pub fn free_variables(expr: &Expr) -> BTreeSet<Ident> {
-    match expr {
-        Expr::Int(_) => BTreeSet::new(),
-        Expr::Bool(_) => BTreeSet::new(),
-        Expr::Variable(ident) => {
-            let mut set = BTreeSet::new();
-            set.insert(ident.clone());
-            set
-        }
-        Expr::Operand2(e1, _, e2) => {
-            let mut set = free_variables(e1);
-            set.extend(free_variables(e2));
-            set
-        }
-        Expr::If(e1, e2, e3) => {
-            let mut set = free_variables(e1);
-            set.extend(free_variables(e2));
-            set.extend(free_variables(e3));
-            set
-        }
-        Expr::Let(ident, e1, e2) => {
-            let mut set = free_variables(e1);
-            let mut set2 = free_variables(e2);
-            set2.remove(ident);
-            set.extend(set2);
-            set
-        }
-    }
-}
+// pub fn free_variables(expr: &Expr) -> BTreeSet<Ident> {
+//     match expr {
+//         Expr::Int(_) => BTreeSet::new(),
+//         Expr::Bool(_) => BTreeSet::new(),
+//         Expr::Variable(ident) => {
+//             let mut set = BTreeSet::new();
+//             set.insert(ident.clone());
+//             set
+//         }
+//         Expr::Operand2(e1, _, e2) => {
+//             let mut set = free_variables(e1);
+//             set.extend(free_variables(e2));
+//             set
+//         }
+//         Expr::If(e1, e2, e3) => {
+//             let mut set = free_variables(e1);
+//             set.extend(free_variables(e2));
+//             set.extend(free_variables(e3));
+//             set
+//         }
+//         Expr::Let(ident, e1, e2) => {
+//             let mut set = free_variables(e1);
+//             let mut set2 = free_variables(e2);
+//             set2.remove(ident);
+//             set.extend(set2);
+//             set
+//         }
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -1086,6 +1209,72 @@ mod tests {
                     Operator2::Add,
                     Box::new(Expr::Int(2)),
                 )),
+            )
+        );
+    }
+
+    #[test]
+    fn parse_fn() {
+        let expr_str = "fun x -> x + 1";
+
+        let tokens = tokenize(expr_str).unwrap();
+        let expr = parse_expr(&tokens).unwrap();
+
+        assert_eq!(
+            expr,
+            Expr::Fun(
+                Ident("x".to_string()),
+                Box::new(Expr::Operand2(
+                    Box::new(Expr::Variable(Ident("x".to_string()))),
+                    Operator2::Add,
+                    Box::new(Expr::Int(1)),
+                )),
+            )
+        );
+    }
+
+    #[test]
+    fn parse_apply() {
+        let expr_str = "let f = fun x -> x + 1 in f 10";
+
+        let tokens = tokenize(expr_str).unwrap();
+        let expr = parse_expr(&tokens).unwrap();
+
+        assert_eq!(
+            expr,
+            Expr::Let(
+                Ident("f".to_string()),
+                Box::new(Expr::Fun(
+                    Ident("x".to_string()),
+                    Box::new(Expr::Operand2(
+                        Box::new(Expr::Variable(Ident("x".to_string()))),
+                        Operator2::Add,
+                        Box::new(Expr::Int(1)),
+                    )),
+                )),
+                Box::new(Expr::Apply(
+                    Box::new(Expr::Variable(Ident("f".to_string()))),
+                    Box::new(Expr::Int(10)),
+                )),
+            )
+        );
+    }
+
+    #[test]
+    fn parse_apply2() {
+        let expr_str = "max 1 2";
+
+        let tokens = tokenize(expr_str).unwrap();
+        let expr = parse_expr(&tokens).unwrap();
+
+        assert_eq!(
+            expr,
+            Expr::Apply(
+                Box::new(Expr::Apply(
+                    Box::new(Expr::Variable(Ident("max".to_string()))),
+                    Box::new(Expr::Int(1)),
+                )),
+                Box::new(Expr::Int(2)),
             )
         );
     }
