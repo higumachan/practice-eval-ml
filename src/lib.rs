@@ -1,6 +1,8 @@
 use anyhow::bail;
 use itertools::Itertools;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
+use std::ops::Sub;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -127,12 +129,15 @@ impl Display for Expr {
 pub enum Rule {
     EInt,
     EBool,
+    EVar1,
+    EVar2,
     EPlus,
     EMinus,
     ETimes,
     ELt,
     EIfT,
     EIfF,
+    ELet,
     BPlus,
     BMinus,
     BTimes,
@@ -170,10 +175,13 @@ impl Display for Rule {
             Rule::BMinus => write!(f, "B-Minus"),
             Rule::ETimes => write!(f, "E-Times"),
             Rule::BTimes => write!(f, "B-Times"),
+            Rule::ELet => write!(f, "E-Let"),
             Rule::EIfT => write!(f, "E-IfT"),
             Rule::EIfF => write!(f, "E-IfF"),
             Rule::ELt => write!(f, "E-Lt"),
             Rule::BLt => write!(f, "B-Lt"),
+            Rule::EVar1 => write!(f, "E-Var1"),
+            Rule::EVar2 => write!(f, "E-Var2"),
             Rule::EIfInt => write!(f, "E-IfInt"),
             Rule::EPlusBoolL => write!(f, "E-PlusBoolL"),
             Rule::EPlusBoolR => write!(f, "E-PlusBoolR"),
@@ -204,15 +212,23 @@ pub struct ExprNode {
     eval_to: Value,
     rule: Rule,
     children: Vec<Box<DerivationNode>>,
+    environment: Environment,
 }
 
 impl ExprNode {
-    pub fn new(expr: Expr, eval_to: Value, rule: Rule, children: Vec<Box<DerivationNode>>) -> Self {
+    pub fn new(
+        expr: Expr,
+        eval_to: Value,
+        rule: Rule,
+        children: Vec<Box<DerivationNode>>,
+        environment: Environment,
+    ) -> Self {
         Self {
             expr,
             eval_to,
             rule,
             children,
+            environment,
         }
     }
 }
@@ -254,27 +270,83 @@ pub enum LeftOrRight {
 pub enum ApplyError {
     RuleNotDefined,
     RuntimeError(Value, LeftOrRight, Operator2),
+    VariableNotFound(Ident),
 }
 
 type ApplyResult = Result<DerivationNode, ApplyError>;
 
-pub fn eval(expr: &Expr) -> ApplyResult {
+#[derive(Debug, Clone)]
+pub enum Environment {
+    Extend(Ident, Value, Box<Environment>),
+    Empty,
+}
+
+impl FromIterator<(Ident, Value)> for Environment {
+    fn from_iter<T: IntoIterator<Item = (Ident, Value)>>(iter: T) -> Self {
+        let mut env = Environment::Empty;
+        for (id, v) in iter {
+            env = Environment::Extend(id, v, Box::new(env));
+        }
+        env
+    }
+}
+
+impl Display for Environment {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Environment::Extend(id, v, env) if matches!(env.as_ref(), Environment::Empty) => {
+                write!(f, "{} = {}", id, v)
+            }
+            Environment::Extend(id, v, env) => {
+                write!(f, "{}, {} = {}", env, id, v)
+            }
+            Environment::Empty => write!(f, ""),
+        }
+    }
+}
+
+pub fn eval(environment: &Environment, expr: &Expr) -> ApplyResult {
     match expr {
         Expr::Int(i) => Ok(DerivationNode::Expr(ExprNode::new(
             expr.clone(),
             Value::Int(*i),
             Rule::EInt,
             vec![],
+            environment.clone(),
         ))),
         Expr::Bool(b) => Ok(DerivationNode::Expr(ExprNode::new(
             expr.clone(),
             Value::Bool(*b),
             Rule::EBool,
             vec![],
+            environment.clone(),
         ))),
+        Expr::Variable(ident) => match &environment {
+            Environment::Extend(id, v, env) => {
+                if id == ident {
+                    Ok(DerivationNode::Expr(ExprNode::new(
+                        expr.clone(),
+                        v.clone(),
+                        Rule::EVar1,
+                        vec![],
+                        environment.clone(),
+                    )))
+                } else {
+                    let e = eval(env, expr)?;
+                    Ok(DerivationNode::Expr(ExprNode::new(
+                        expr.clone(),
+                        e.eval_to().unwrap().clone(),
+                        Rule::EVar2,
+                        vec![Box::new(e)],
+                        environment.clone(),
+                    )))
+                }
+            }
+            _ => Err(ApplyError::VariableNotFound(ident.clone())),
+        },
         Expr::Operand2(e1, op, e2) => {
-            let e1 = eval(e1)?;
-            let e2 = eval(e2)?;
+            let e1 = eval(environment, e1)?;
+            let e2 = eval(environment, e2)?;
             let left_value = e1.eval_to().unwrap();
             let right_value = e2.eval_to().unwrap();
 
@@ -329,10 +401,11 @@ pub fn eval(expr: &Expr) -> ApplyResult {
                         answer: eval_to.clone(),
                     }),
                 ],
+                environment.clone(),
             )))
         }
         Expr::If(e1, e2, e3) => {
-            let e1 = eval(e1)?;
+            let e1 = eval(environment, e1)?;
             let Some(cond) = e1.eval_to().unwrap().bool() else {
                 return Ok(DerivationNode::Error {
                     expr: expr.clone(),
@@ -341,7 +414,7 @@ pub fn eval(expr: &Expr) -> ApplyResult {
                 });
             };
             if cond {
-                let a = eval(e2)?;
+                let a = eval(environment, e2)?;
                 match a.eval_to().unwrap() {
                     Value::Error => Ok(DerivationNode::Error {
                         expr: expr.clone(),
@@ -353,17 +426,37 @@ pub fn eval(expr: &Expr) -> ApplyResult {
                         v.clone(),
                         Rule::EIfT,
                         vec![Box::new(e1.clone()), Box::new(a)],
+                        environment.clone(),
                     ))),
                 }
             } else {
-                let a = eval(e3)?;
+                let a = eval(environment, e3)?;
                 Ok(DerivationNode::Expr(ExprNode::new(
                     expr.clone(),
                     a.eval_to().unwrap().clone(),
                     Rule::EIfF,
                     vec![Box::new(e1.clone()), Box::new(a)],
+                    environment.clone(),
                 )))
             }
+        }
+        Expr::Let(ident, e1, e2) => {
+            let e1 = eval(environment, e1)?;
+            let e2 = eval(
+                &Environment::Extend(
+                    ident.clone(),
+                    e1.eval_to().unwrap().clone(),
+                    Box::new(environment.clone()),
+                ),
+                e2,
+            )?;
+            Ok(DerivationNode::Expr(ExprNode::new(
+                expr.clone(),
+                e2.eval_to().unwrap().clone(),
+                Rule::ELet,
+                vec![Box::new(e1), Box::new(e2)],
+                environment.clone(),
+            )))
         }
         _ => Err(ApplyError::RuleNotDefined),
     }
@@ -375,8 +468,8 @@ impl Display for DerivationNode {
             DerivationNode::Expr(expr_node) => {
                 write!(
                     f,
-                    "{} evalto {} by {} {{",
-                    &expr_node.expr, &expr_node.eval_to, &expr_node.rule
+                    "{} |- {} evalto {} by {} {{",
+                    &expr_node.environment, &expr_node.expr, &expr_node.eval_to, &expr_node.rule
                 )?;
                 for (i, child) in expr_node.children.iter().enumerate() {
                     if i > 0 {
@@ -652,8 +745,14 @@ pub fn parse_paren_expr(tokens: &[Token]) -> ParseResult<Expr> {
     )(tokens)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ident(String);
+
+impl Ident {
+    pub fn new(field0: &str) -> Self {
+        Self(field0.to_string())
+    }
+}
 
 impl Display for Ident {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -828,6 +927,36 @@ pub fn parse_let_in(token: &[Token]) -> ParseResult<Expr> {
             rest,
         ),
         ParseResult::Err(rest) => ParseResult::Err(rest),
+    }
+}
+
+pub fn free_variables(expr: &Expr) -> BTreeSet<Ident> {
+    match expr {
+        Expr::Int(_) => BTreeSet::new(),
+        Expr::Bool(_) => BTreeSet::new(),
+        Expr::Variable(ident) => {
+            let mut set = BTreeSet::new();
+            set.insert(ident.clone());
+            set
+        }
+        Expr::Operand2(e1, _, e2) => {
+            let mut set = free_variables(e1);
+            set.extend(free_variables(e2));
+            set
+        }
+        Expr::If(e1, e2, e3) => {
+            let mut set = free_variables(e1);
+            set.extend(free_variables(e2));
+            set.extend(free_variables(e3));
+            set
+        }
+        Expr::Let(ident, e1, e2) => {
+            let mut set = free_variables(e1);
+            let mut set2 = free_variables(e2);
+            set2.remove(ident);
+            set.extend(set2);
+            set
+        }
     }
 }
 
