@@ -177,4 +177,42 @@ fn main() {
 
     let dt = eval(&[].into_iter().collect(), &expr).unwrap();
     println!("{}", dt);
+
+    let tokens = tokenize(
+        "let compose = fun f -> fun g -> fun x -> f (g x) in 
+   let p = fun x -> x * x in
+   let q = fun x -> x + 4 in
+compose p q 4",
+    )
+    .unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize(
+        r#"
+        let s = fun f -> fun g -> fun x -> f x (g x) in
+       let k = fun x -> fun y -> x in
+       s k k 7
+"#,
+    )
+    .unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize(
+        r#"
+let rec fact = fun n ->
+   if n < 2 then 1 else n * fact (n - 1) in
+   fact 3
+"#,
+    )
+    .unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
 }

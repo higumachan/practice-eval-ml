@@ -9,6 +9,7 @@ pub enum Value {
     Int(i32),
     Bool(bool),
     Fun(Box<Environment>, Ident, Box<Expr>),
+    RecFun(Box<Environment>, Ident, Ident, Box<Expr>),
     Error,
 }
 
@@ -20,6 +21,11 @@ impl Display for Value {
             Value::Fun(environ, ident, expr) => {
                 write!(f, "({}) [fun {} -> {}]", environ, ident, expr)
             }
+            Value::RecFun(environ, ident1, ident2, expr) => write!(
+                f,
+                "({}) [rec {} = fun {} -> {}]",
+                environ, ident1, ident2, expr
+            ),
             Value::Error => write!(f, "error"),
         }
     }
@@ -123,6 +129,7 @@ pub enum Expr {
     Operand2(Box<Expr>, Operator2, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(Ident, Box<Expr>, Box<Expr>),
+    LetRec(Ident, Ident, Box<Expr>, Box<Expr>),
     Fun(Ident, Box<Expr>),
     Apply(Box<Expr>, Box<Expr>),
 }
@@ -138,6 +145,9 @@ impl Display for Expr {
             Expr::Let(s, e1, e2) => write!(f, "(let {} = {} in {})", s, e1, e2),
             Expr::Fun(s, e) => write!(f, "(fun {} -> {})", s, e),
             Expr::Apply(e1, e2) => write!(f, "({} {})", e1, e2),
+            Expr::LetRec(s, a, e1, e2) => {
+                write!(f, "(let rec {} = fun {} -> {} in {})", s, a, e1, e2)
+            }
         }
     }
 }
@@ -155,6 +165,7 @@ pub enum Rule {
     EIfT,
     EIfF,
     ELet,
+    ELetRec,
     EFun,
     EApp,
     BPlus,
@@ -195,6 +206,7 @@ impl Display for Rule {
             Rule::ETimes => write!(f, "E-Times"),
             Rule::BTimes => write!(f, "B-Times"),
             Rule::ELet => write!(f, "E-Let"),
+            Rule::ELetRec => write!(f, "E-LetRec"),
             Rule::EFun => write!(f, "E-Fun"),
             Rule::EApp => write!(f, "E-App"),
             Rule::EIfT => write!(f, "E-IfT"),
@@ -479,6 +491,27 @@ pub fn eval(environment: &Environment, expr: &Expr) -> ApplyResult {
                 environment.clone(),
             )))
         }
+        Expr::LetRec(bind, parameter, e1, e2) => {
+            let env = Environment::Extend(
+                bind.clone(),
+                Value::RecFun(
+                    Box::new(environment.clone()),
+                    bind.clone(),
+                    parameter.clone(),
+                    e1.clone(),
+                ),
+                Box::new(environment.clone()),
+            );
+
+            let e2 = eval(&env, e2)?;
+            Ok(DerivationNode::Expr(ExprNode::new(
+                expr.clone(),
+                e2.eval_to().unwrap().clone(),
+                Rule::ELetRec,
+                vec![Box::new(e2)],
+                environment.clone(),
+            )))
+        }
         Expr::Fun(ident, e) => Ok(DerivationNode::Expr(ExprNode::new(
             expr.clone(),
             Value::Fun(Box::new(environment.clone()), ident.clone(), e.clone()),
@@ -489,6 +522,7 @@ pub fn eval(environment: &Environment, expr: &Expr) -> ApplyResult {
         Expr::Apply(func, arg) => {
             let e1 = eval(environment, func)?;
             let e2 = eval(environment, arg)?;
+            // TODO: ここでApplyRecを実装する
             let (closed_env, ident, func_body) = e1.eval_to().unwrap().fun().unwrap();
             let e3 = eval(
                 &Environment::Extend(ident.clone(), e2.eval_to().unwrap().clone(), closed_env),
@@ -576,6 +610,7 @@ pub enum Token {
     In,
     Fun,
     Arrow,
+    Rec,
     Int(i32),
     Bool(bool),
     Ident(String),
@@ -588,6 +623,8 @@ pub fn tokenize(input: &str) -> anyhow::Result<Vec<Token>> {
     while let Some(c) = chars.next() {
         match c {
             ' ' => continue,
+            '\n' => continue,
+            '\t' => continue,
             '(' => tokens.push(Token::LeftParen),
             ')' => tokens.push(Token::RightParen),
             '+' => tokens.push(Token::Plus),
@@ -629,6 +666,7 @@ pub fn tokenize(input: &str) -> anyhow::Result<Vec<Token>> {
                     "true" => tokens.push(Token::Bool(true)),
                     "false" => tokens.push(Token::Bool(false)),
                     "fun" => tokens.push(Token::Fun),
+                    "rec" => tokens.push(Token::Rec),
                     _ => tokens.push(Token::Ident(s)),
                 }
             }
@@ -696,6 +734,7 @@ pub fn parse_expr(tokens: &[Token]) -> ParseResult<Expr> {
         Box::new(parse_less_than),
         Box::new(parse_if),
         Box::new(parse_let_in),
+        Box::new(parse_let_rec_in),
         Box::new(parse_fn_expr),
     ])(tokens)
 }
@@ -915,7 +954,7 @@ pub fn map<'a, I: 'a, O: 'a>(parser: ParserFunc<'a, I>, f: fn(I) -> O) -> Parser
     })
 }
 
-pub fn opt<'a>(parser: ParserFunc<'a, Expr>) -> ParserFunc<'a, Option<Expr>> {
+pub fn opt<'a, T: 'a>(parser: ParserFunc<'a, T>) -> ParserFunc<'a, Option<T>> {
     Box::new(move |tokens| match parser(tokens) {
         ParseResult::Ok(expr, rest) => ParseResult::Ok(Some(expr), rest),
         ParseResult::Err(_) => ParseResult::Ok(None, tokens),
@@ -1049,6 +1088,37 @@ pub fn parse_let_in(token: &[Token]) -> ParseResult<Expr> {
             ),
             rest,
         ),
+        ParseResult::Err(rest) => ParseResult::Err(rest),
+    }
+}
+
+pub fn parse_let_rec_in(token: &[Token]) -> ParseResult<Expr> {
+    match sequence(vec![
+        Seq::Skip(tag(Token::Let)),
+        Seq::Skip(tag(Token::Rec)),
+        Seq::Ident(Box::new(parse_ident)),
+        Seq::Skip(tag(Token::Equals)),
+        Seq::Expr(Box::new(parse_fn_expr)),
+        Seq::Skip(tag(Token::In)),
+        Seq::Expr(Box::new(parse_expr)),
+    ])(token)
+    {
+        ParseResult::Ok(exprs, rest) => {
+            let ident1 = exprs[0].ident();
+            let Expr::Fun(parameter, func_body) = exprs[1].expr() else {
+                return ParseResult::Err(rest);
+            };
+            let body = exprs[2].expr();
+            ParseResult::Ok(
+                Expr::LetRec(
+                    ident1.clone(),
+                    parameter.clone(),
+                    func_body.clone(),
+                    Box::new(body.clone()),
+                ),
+                rest,
+            )
+        }
         ParseResult::Err(rest) => ParseResult::Err(rest),
     }
 }
@@ -1275,6 +1345,24 @@ mod tests {
                     Box::new(Expr::Int(1)),
                 )),
                 Box::new(Expr::Int(2)),
+            )
+        );
+    }
+
+    #[test]
+    fn parse_let_rec() {
+        let expr_str = "let rec f = fun x -> x in x";
+
+        let tokens = tokenize(expr_str).unwrap();
+        let expr = parse_expr(&tokens).unwrap();
+
+        assert_eq!(
+            expr,
+            Expr::LetRec(
+                Ident("f".to_string()),
+                Ident("x".to_string()),
+                Box::new(Expr::Variable(Ident("x".to_string()))),
+                Box::new(Expr::Variable(Ident("x".to_string()))),
             )
         );
     }
