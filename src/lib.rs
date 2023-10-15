@@ -67,10 +67,10 @@ pub enum Operator2 {
 impl Operator2 {
     pub fn eval(&self, left: &Value, right: &Value) -> Result<Value, ApplyError> {
         let left = left.int().ok_or_else(|| {
-            ApplyError::RuntimeError(left.clone(), LeftOrRight::Left, self.clone())
+            ApplyError::RuntimeOperator2Error(left.clone(), LeftOrRight::Left, self.clone())
         })?;
         let right = right.int().ok_or_else(|| {
-            ApplyError::RuntimeError(right.clone(), LeftOrRight::Right, self.clone())
+            ApplyError::RuntimeOperator2Error(right.clone(), LeftOrRight::Right, self.clone())
         })?;
         match self {
             Operator2::Add => Ok(Value::Int(left + right)),
@@ -168,6 +168,7 @@ pub enum Rule {
     ELetRec,
     EFun,
     EApp,
+    EAppRec,
     BPlus,
     BMinus,
     BTimes,
@@ -209,6 +210,7 @@ impl Display for Rule {
             Rule::ELetRec => write!(f, "E-LetRec"),
             Rule::EFun => write!(f, "E-Fun"),
             Rule::EApp => write!(f, "E-App"),
+            Rule::EAppRec => write!(f, "E-AppRec"),
             Rule::EIfT => write!(f, "E-IfT"),
             Rule::EIfF => write!(f, "E-IfF"),
             Rule::ELt => write!(f, "E-Lt"),
@@ -302,7 +304,8 @@ pub enum LeftOrRight {
 #[derive(Debug, Clone)]
 pub enum ApplyError {
     RuleNotDefined,
-    RuntimeError(Value, LeftOrRight, Operator2),
+    RuntimeOperator2Error(Value, LeftOrRight, Operator2),
+    RuntimeApplyError { callee: Value },
     VariableNotFound(Ident),
 }
 
@@ -385,7 +388,7 @@ pub fn eval(environment: &Environment, expr: &Expr) -> ApplyResult {
 
             let eval_to = match op.eval(left_value, right_value) {
                 Ok(v) => v,
-                Err(ApplyError::RuntimeError(v, left_or_right, op)) => {
+                Err(ApplyError::RuntimeOperator2Error(v, left_or_right, op)) => {
                     return Ok(DerivationNode::Error {
                         expr: expr.clone(),
                         rule: match (v, &left_or_right, op) {
@@ -521,20 +524,59 @@ pub fn eval(environment: &Environment, expr: &Expr) -> ApplyResult {
         ))),
         Expr::Apply(func, arg) => {
             let e1 = eval(environment, func)?;
-            let e2 = eval(environment, arg)?;
-            // TODO: ここでApplyRecを実装する
-            let (closed_env, ident, func_body) = e1.eval_to().unwrap().fun().unwrap();
-            let e3 = eval(
-                &Environment::Extend(ident.clone(), e2.eval_to().unwrap().clone(), closed_env),
-                &func_body,
-            )?;
-            Ok(DerivationNode::Expr(ExprNode::new(
-                expr.clone(),
-                e3.eval_to().unwrap().clone(),
-                Rule::EApp,
-                vec![Box::new(e1), Box::new(e2), Box::new(e3)],
-                environment.clone(),
-            )))
+            match e1.eval_to().unwrap() {
+                Value::Fun(closed_env, ident, func_body) => {
+                    let e2 = eval(environment, arg)?;
+                    // TODO: ここでApplyRecを実装する
+                    let e3 = eval(
+                        &Environment::Extend(
+                            ident.clone(),
+                            e2.eval_to().unwrap().clone(),
+                            closed_env.clone(),
+                        ),
+                        &func_body,
+                    )?;
+                    Ok(DerivationNode::Expr(ExprNode::new(
+                        expr.clone(),
+                        e3.eval_to().unwrap().clone(),
+                        Rule::EApp,
+                        vec![Box::new(e1), Box::new(e2), Box::new(e3)],
+                        environment.clone(),
+                    )))
+                }
+                Value::RecFun(closed_env, bind, parameter, func_body) => {
+                    let e2 = eval(environment, arg)?;
+                    let v = eval(
+                        &Environment::Extend(
+                            parameter.clone(),
+                            e2.clone().eval_to().unwrap().clone(),
+                            Box::new(Environment::Extend(
+                                bind.clone(),
+                                Value::RecFun(
+                                    closed_env.clone(),
+                                    bind.clone(),
+                                    parameter.clone(),
+                                    func_body.clone(),
+                                ),
+                                closed_env.clone(),
+                            )),
+                        ),
+                        &func_body,
+                    )?;
+                    Ok(DerivationNode::Expr(ExprNode::new(
+                        expr.clone(),
+                        v.eval_to().unwrap().clone(),
+                        Rule::EAppRec,
+                        vec![Box::new(e1), Box::new(e2), Box::new(v)],
+                        environment.clone(),
+                    )))
+                }
+                _ => {
+                    return Err(ApplyError::RuntimeApplyError {
+                        callee: e1.eval_to().unwrap().clone(),
+                    })
+                }
+            }
         }
         _ => Err(ApplyError::RuleNotDefined),
     }

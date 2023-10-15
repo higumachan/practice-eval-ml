@@ -215,4 +215,42 @@ let rec fact = fun n ->
 
     let dt = eval(&[].into_iter().collect(), &expr).unwrap();
     println!("{}", dt);
+
+    let tokens = tokenize(
+        r#"
+let rec fib = fun n -> if n < 3 then 1 else fib (n - 1) + fib (n - 2) in
+   fib 5
+"#,
+    )
+    .unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize(
+        r#"
+let rec sum = fun f -> fun n ->
+     if n < 1 then 0 else f n + sum f (n - 1) in 
+   sum (fun x -> x * x) 2
+"#,
+    )
+    .unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
+
+    let tokens = tokenize(
+        r#"
+let fact = fun self -> fun n ->
+     if n < 2 then 1 else n * self self (n - 1) in
+   fact fact 3
+"#,
+    )
+    .unwrap();
+    let expr = parse_expr(&tokens).unwrap();
+
+    let dt = eval(&[].into_iter().collect(), &expr).unwrap();
+    println!("{}", dt);
 }
